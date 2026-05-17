@@ -2,60 +2,50 @@
 ///
 /// 设计原因：用 trait 隔离具体 Provider 实现（OpenAI / Anthropic / Ollama 等），
 /// 上层 Agent Loop 只依赖这个接口，换模型时不需要改动业务逻辑。
+///
+/// Phase 2 变更：
+/// - 类型定义移至 types.rs，这里通过 pub use 重新导出
+/// - 新增 chat_stream() 方法支持流式输出
+/// - 新增 anthropic 模块
 
+pub mod types;
 pub mod openai;
+pub mod anthropic;
+
+// 重新导出类型，外部使用 `use crate::llm::Message` 即可
+pub use types::*;
 
 use anyhow::Result;
 use async_trait::async_trait;
-
-/// 消息角色
-///
-/// OpenAI 格式：user / assistant / system
-/// Anthropic 格式类似，但 system 是单独字段（Phase 2 处理）
-#[derive(Debug, Clone, PartialEq)]
-pub enum Role {
-    User,
-    Assistant,
-    System,
-}
-
-impl Role {
-    /// 序列化为 API 使用的字符串
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::System => "system",
-        }
-    }
-}
-
-/// 单条对话消息
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub role: Role,
-    pub content: String,
-}
-
-impl Message {
-    pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into() }
-    }
-
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: content.into() }
-    }
-
-    pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: content.into() }
-    }
-}
+use futures::Stream;
+use std::pin::Pin;
 
 /// LLM Provider 统一接口
 ///
-/// Phase 1：只需 chat()，输入消息列表，输出回复文本。
-/// Phase 2 会扩展 chat_stream() 支持流式输出。
+/// Phase 1：只有 chat()
+/// Phase 2：新增 chat_stream()，返回异步 token 流
+///
+/// 为什么用 trait object（Box<dyn LlmProvider>）而不是泛型？
+/// - 运行时根据环境变量选择 provider，需要动态分发
+/// - Phase 5 的 TUI 持有 Box<dyn LlmProvider>，不关心具体类型
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
+    /// 非流式调用 — 输入消息列表，输出完整回复文本
+    ///
+    /// 保留此方法的原因：测试方便 + 向后兼容 + 某些场景不需要流式
     async fn chat(&self, messages: &[Message]) -> Result<String>;
+
+    /// 流式调用 — 返回 token 流
+    ///
+    /// 为什么返回 Stream 而不是 callback？
+    /// - Stream 可组合：可以 map / filter / forward 到 channel
+    /// - Phase 5 接入 TUI 时只需 `while let Some(chunk) = stream.next().await { tx.send(chunk) }`
+    /// - callback 会把消费逻辑耦合进 Provider 内部，不利于架构分层
+    ///
+    /// 生命周期 'a 的含义：Stream 的存活时间不超过 &self 和 &messages
+    /// 调用方必须保证 messages 在 Stream 被完全消费前不被 drop
+    fn chat_stream<'a>(
+        &'a self,
+        messages: &'a [Message],
+    ) -> Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send + 'a>>;
 }

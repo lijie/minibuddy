@@ -21,3 +21,7 @@ thiserror = "2"
 
 # async trait 支持（Rust 目前 trait 中的 async fn 需要此 crate）
 async-trait = "0.1"
+
+# 流式输出支持（Phase 2）
+futures = "0.3"              # Stream trait + StreamExt
+async-stream = "0.3"        # stream! 宏，简化异步 Stream 生成
