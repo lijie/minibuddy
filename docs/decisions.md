@@ -325,3 +325,63 @@
 - 双重保障：即使 Agent 层逻辑有 bug 绕过了确认，Tool 层也会拒绝写入系统路径
 - 防御纵深（Defense in Depth）原则
 - Agent 层确认是"用户体验"层面（展示预览、给用户决定权），Tool 层检查是"硬性安全"层面
+
+---
+
+## Phase 5：TUI 基础界面
+
+### D5-1：UI 线程与 Agent 线程分离 + mpsc channel 通信
+
+**决策**：TUI 在主 async task 运行（持有 Terminal），Agent 在 `tokio::spawn` 中运行，通过两条 `tokio::sync::mpsc` channel 双向通信。
+
+**原因**：
+- LLM 调用可能阻塞数秒，如果在同一 task 中 UI 会冻结
+- mpsc channel 是 tokio 异步生态中最自然的 task 间通信方式
+- 使用 `tokio::select!` 同时监听终端事件和 Agent 事件，实现非阻塞 UI
+
+**代价**：Agent::run() 返回值从 `Result<String>` 改为 `Result<()>`（最终回答通过 AgentEvent 发送）
+
+---
+
+### D5-2：Agent 通过 event_tx 发送事件替代 println!
+
+**决策**：Agent 持有 `mpsc::Sender<AgentEvent>`，所有输出（思考状态、工具调用、最终回答）通过 channel 发送，不再直接 println!。
+
+**原因**：
+- TUI 接管终端后，println! 会破坏界面渲染
+- Channel 解耦了"产生信息"和"展示信息"：Agent 不关心信息如何展示
+- 未来换 UI 框架（如 Web 前端）只需替换消费端，Agent 端零改动
+
+---
+
+### D5-3：确认流程使用嵌入的 oneshot channel
+
+**决策**：Agent 发送 `AgentEvent::ConfirmationRequest { message, response_tx: oneshot::Sender<bool> }`，然后 `await response_rx`。UI 收到后切换到确认模式，用户按 y/n 后通过 oneshot 回传结果。
+
+**原因**：
+- Agent task 需要暂停等待用户确认——oneshot 天然支持"发一次、等一次"的语义
+- 不需要额外的 channel 或共享状态
+- 如果 UI 意外退出（channel dropped），`await` 返回 Err → 默认拒绝（安全兜底）
+
+---
+
+### D5-4：Phase 5 不做流式最终回答
+
+**决策**：最终回答仍通过 `chat_with_tools()` 获取完整文本后一次性发送 `FinalResponse` 事件，不使用 `chat_stream()`。
+
+**原因**：
+- `chat_stream()` 不接受 tools 参数，行为会与 Agent Loop 中的 `chat_with_tools()` 不一致
+- 要支持"最后一轮流式输出"需要一种混合模式（先 chat_with_tools 判断无工具调用，再 chat_stream 重新请求），额外增加一次 API 调用
+- Phase 9 再引入流式渲染，届时可考虑实现 `chat_stream_with_tools()`
+
+---
+
+### D5-5：文件日志替代 stderr 调试
+
+**决策**：Agent 内部用 `log()` / `log_block()` / `log_messages()` / `log_response()` 将调试信息写入 `mini-buddy.log` 文件。
+
+**原因**：
+- TUI raw mode 下 stderr 输出会破坏界面
+- 文件日志可以用 `tail -f mini-buddy.log` 实时查看，不干扰 TUI
+- 日志格式化展示完整消息历史（role 区分）、LLM 响应（content + tool_calls）、工具执行结果
+- 教学意义：学习者可以通过日志理解 Agent 每一步在做什么

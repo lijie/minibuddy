@@ -288,21 +288,32 @@ src/
 **目标：** 炫酷的终端体验
 
 **改动：**
+- 流式输出逐 token 渲染（需要 `chat_stream_with_tools()` 或混合模式）
 - Markdown 渲染（代码块语法高亮、列表、标题、粗体等）
 - 代码 Diff 着色展示（绿色添加、红色删除）
 - reasoning_content（思考过程）折叠/展开显示
 - 工具调用过程动画（spinner、进度条）
 - 主题系统（亮色/暗色）
+- 多行输入编辑器（替代 Phase 5 的单行输入）
+- 上下滚动聊天历史（键盘 PageUp/Down）
+- Unicode 宽度计算（中文字符正确占 2 列宽）
 
 **新增模块：**
 ```
 src/tui/
 ├── markdown.rs      # Markdown → Ratatui Spans 转换
 ├── diff.rs          # Diff 着色渲染
+├── input.rs         # 多行输入编辑器
 └── theme.rs         # 颜色主题
 ```
 
-**验证：** 代码块有语法高亮，Diff 有颜色区分
+**新增依赖（可选）：**
+```toml
+unicode-width = "0.2"      # 中文宽度计算
+syntect = "5"              # 语法高亮（可选，也可用简单规则）
+```
+
+**验证：** 代码块有语法高亮，Diff 有颜色区分，支持滚动和多行输入
 
 ---
 

@@ -25,3 +25,8 @@ async-trait = "0.1"
 # 流式输出支持（Phase 2）
 futures = "0.3"              # Stream trait + StreamExt
 async-stream = "0.3"        # stream! 宏，简化异步 Stream 生成
+
+# TUI 界面（Phase 5）
+ratatui = "0.29"             # 终端 UI 框架
+crossterm = { version = "0.28", features = ["event-stream"] }  # 跨平台终端操作
+unicode-width = "0.2"        # Unicode 显示宽度计算（中文字符占 2 列）
