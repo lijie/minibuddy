@@ -14,6 +14,8 @@
 
 pub mod bash;
 pub mod read_file;
+pub mod sandbox;       // Phase 4: 命令安全分级
+pub mod write_file;    // Phase 4: 文件写入工具
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -93,6 +95,11 @@ impl ToolRegistry {
         self.tools.get(name).map(|t| t.as_ref())
     }
 
+    /// 列出所有已注册工具的名字（用于错误提示）
+    pub fn list_names(&self) -> Vec<&str> {
+        self.tools.keys().map(|s| s.as_str()).collect()
+    }
+
     /// 生成所有工具的定义列表
     /// 这是 Tool trait 和 LLM Provider 之间的桥梁——
     /// Tool 实现者提供 name/description/schema，
@@ -116,11 +123,12 @@ impl ToolRegistry {
 /// 创建包含所有内置工具的注册表
 ///
 /// Phase 3 内置工具：bash + read_file
-/// Phase 4 将新增 write_file（带确认流程）
+/// Phase 4 新增：write_file（带确认流程）
 /// Phase 8 将新增 MCP 动态工具
 pub fn create_default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(bash::BashTool));
     registry.register(Box::new(read_file::ReadFileTool));
+    registry.register(Box::new(write_file::WriteFileTool));
     registry
 }

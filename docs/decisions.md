@@ -253,3 +253,75 @@
 - 管道符 `|`、重定向 `>`、命令链接 `&&` 都是 shell 语法，`Command::new("ls")` 无法解释
 - `sh -c` 让 shell 来解析整个命令字符串，支持所有 shell 特性
 - Phase 4 将在 `sh -c` 前加安全预检层（命令黑名单匹配）
+
+---
+
+## Phase 4：Bash 沙盒 + 权限控制
+
+### D4-1：权限检查在 Agent 层，不在 Tool 层
+
+**决策**：`execute_tool()` 在调用 `tool.execute()` 前做权限检查和用户确认，Tool trait 本身不感知权限。
+
+**原因**：
+- Tool trait 保持纯净——只关心"执行"，无 I/O 交互副作用，方便单元测试
+- 不同工具的确认展示方式不同（bash 显示命令，write_file 显示路径+预览），应在调用方定制
+- Phase 5 TUI 改造时只需改 Agent 层的确认方式（`ask_user_confirmation`），Tool 层零改动
+
+**替代方案**：在 Tool trait 上加 `permission_level()` 方法。但权限与参数相关（`rm file.txt` vs `rm -rf /`），静态 trait 方法无法表达这种动态性。
+
+---
+
+### D4-2：用户确认不进入 LLM 消息历史
+
+**决策**：确认交互是纯终端 I/O（stdin/stdout），不会在 `Vec<Message>` 中插入任何消息。LLM 只看到 tool_result 是成功还是"操作已被用户取消"。
+
+**原因**：
+- Anthropic API 要求严格的 user/assistant 交替格式，插入额外 user 消息会破坏消息历史结构
+- 也不会打断 `anthropic.rs` 中连续 tool_result 的合并逻辑（D3-6）
+- LLM 收到"被取消"后会自动换方式尝试或向用户解释，无需知道确认流程的存在
+
+---
+
+### D4-3：三级权限模型 + 未知命令默认 Write
+
+**决策**：命令分为 Read（自动执行）、Write（确认后执行）、Dangerous（阻断），未知命令归为 Write。
+
+**原因**：
+- 安全优先原则："不确定时宁可多问一次用户"
+- Read 白名单是显式列举的已知安全命令，不在名单中的都要确认
+- Dangerous 基于命令+参数的组合模式匹配（`rm -rf /` 危险，`rm file.txt` 是普通 Write）
+
+---
+
+### D4-4：先对整体命令检查危险模式，再拆分子命令
+
+**决策**：`classify()` 先在原始完整命令上跑 `check_dangerous_patterns()`，然后才按 `|`/`&&`/`;` 拆分子命令。
+
+**原因**：
+- 某些危险模式跨越管道符：`curl ... | bash` 拆分后分别是 `curl` 和 `bash`，单独看都不危险
+- fork bomb `:(){ :|:& };:` 包含 `|` 和 `;`，拆分后每段无意义
+- 先整体检查能捕获这类跨分隔符的组合危险模式
+
+---
+
+### D4-5：用字符串匹配而非 regex crate
+
+**决策**：sandbox 的命令分类用 `contains()`、`starts_with()`、`split_whitespace()` 等标准库方法，不引入 regex。
+
+**原因**：
+- 教学目的：展示如何不依赖外部库实现模式匹配
+- 零新增依赖，编译时间不变
+- 对于安全预检来说，简单匹配已足够——这不是真正的沙盒，只是"教学级"的前置过滤
+
+**已知限制**：不处理引号内的分隔符（`echo "a | b"` 会被错误拆分），但安全方向倾斜——最坏情况只是多问一次确认。
+
+---
+
+### D4-6：write_file 工具双重安全检查
+
+**决策**：write_file 在 Agent 层始终弹出确认提示，同时在 Tool 层禁止写入 `/etc/`、`/usr/` 等系统目录。
+
+**原因**：
+- 双重保障：即使 Agent 层逻辑有 bug 绕过了确认，Tool 层也会拒绝写入系统路径
+- 防御纵深（Defense in Depth）原则
+- Agent 层确认是"用户体验"层面（展示预览、给用户决定权），Tool 层检查是"硬性安全"层面
