@@ -49,10 +49,16 @@ fn create_provider() -> Result<Box<dyn llm::LlmProvider>> {
                 ))?;
             Ok(Box::new(llm::anthropic::AnthropicProvider::claude_sonnet(api_key)))
         }
+        "ollama" => {
+            // Ollama 本地模型，无需 API key
+            // 通过 OLLAMA_MODEL 环境变量指定模型，默认 qwen2.5
+            let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5".to_string());
+            Ok(Box::new(llm::openai::OpenAIProvider::ollama(model)))
+        }
         other => {
             anyhow::bail!(
-                "❌ 未知的 LLM Provider: '{}'。支持的选项: deepseek, anthropic\n\
-                 设置方式: export LLM_PROVIDER=\"deepseek\"",
+                "❌ 未知的 LLM Provider: '{}'。支持的选项: deepseek, anthropic, ollama\n\
+                 设置方式: export LLM_PROVIDER=\"ollama\"",
                 other
             );
         }

@@ -50,6 +50,19 @@ impl OpenAIProvider {
         )
     }
 
+    /// 快捷构造：Ollama 本地模型
+    ///
+    /// Ollama 完全兼容 OpenAI Chat Completions 格式，
+    /// 默认监听 http://localhost:11434，无需 API key。
+    /// 模型名称对应 ollama pull 下载的模型（如 qwen2.5, llama3 等）。
+    pub fn ollama(model: String) -> Self {
+        Self::new(
+            String::new(), // Ollama 无需 API key
+            "http://localhost:11434/v1".to_string(),
+            model,
+        )
+    }
+
     // ── Phase 3: 工具调用辅助方法 ──────────────────────────────
 
     /// 构建带工具定义的请求体
