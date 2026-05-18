@@ -6,15 +6,22 @@
 /// 3. 认证用 x-api-key header，不是 Bearer token
 /// 4. 流式事件格式完全不同（typed events，而非纯 data: 行）
 ///
+/// Phase 3 新增区别（工具调用格式）：
+/// 5. 工具定义用 input_schema（OpenAI 用 parameters）
+/// 6. 工具调用在 content blocks 中（type: "tool_use"），不是独立的 tool_calls 字段
+/// 7. 工具结果是 user 消息的 content block（type: "tool_result"），不是 role: "tool"
+/// 8. 连续的 tool_result 必须合并到同一个 user 消息（不允许连续同角色消息）
+///
 /// 参考文档：https://docs.anthropic.com/en/api/messages
 
 use anyhow::Result;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
+use serde_json::Value;
 use std::pin::Pin;
 
-use crate::llm::{LlmProvider, Message, Role, StreamChunk};
+use crate::llm::{LlmProvider, LlmResponse, Message, Role, StreamChunk, ToolCall, ToolDefinition};
 
 // ────────────────────────────────────────────────────────────
 // Provider 结构体
@@ -71,6 +78,10 @@ impl AnthropicProvider {
                         "content": &msg.content,
                     }));
                 }
+                Role::Tool => {
+                    // Phase 3: prepare_messages 只用于非工具模式（chat/chat_stream），
+                    // 工具模式走 build_tool_request_body。这里跳过 Tool 消息。
+                }
             }
         }
 
@@ -100,6 +111,195 @@ impl AnthropicProvider {
         }
 
         body
+    }
+
+    // ── Phase 3: 工具调用辅助方法 ──────────────────────────────
+
+    /// 构建带工具定义的请求体（Anthropic 格式）
+    ///
+    /// 与 build_request_body 的区别：
+    /// 1. 多了 tools 数组
+    /// 2. 消息转换更复杂（需处理 tool_use / tool_result content blocks）
+    /// 3. 连续的 tool_result 消息需要合并为单个 user 消息
+    fn build_tool_request_body(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Value {
+        // 提取 system 消息（Anthropic 放在顶层，不在 messages 数组中）
+        let system_content = messages
+            .iter()
+            .find(|m| m.role == Role::System)
+            .map(|m| m.content.clone());
+
+        // 转换消息列表（跳过 system，处理工具相关的特殊格式）
+        let mut api_messages: Vec<Value> = Vec::new();
+
+        for msg in messages.iter().filter(|m| m.role != Role::System) {
+            let converted = self.convert_message_for_tools(msg);
+
+            // Anthropic API 不允许连续的同角色消息
+            // 当一次 LLM 调用返回多个工具调用时，每个工具结果都是 Role::Tool，
+            // 转换后都变成 role: "user"，需要合并到同一个 user 消息中
+            if msg.role == Role::Tool {
+                if let Some(last) = api_messages.last_mut() {
+                    if last["role"] == "user" {
+                        // 将新的 content blocks 合并到已有的 user 消息中
+                        if let (Some(last_content), Some(new_content)) = (
+                            last["content"].as_array_mut(),
+                            converted["content"].as_array(),
+                        ) {
+                            last_content.extend(new_content.iter().cloned());
+                            continue; // 已合并，不需要 push
+                        }
+                    }
+                }
+            }
+
+            api_messages.push(converted);
+        }
+
+        // 转换工具定义（Anthropic 用 input_schema 而非 parameters）
+        let api_tools: Vec<Value> = tools
+            .iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
+                })
+            })
+            .collect();
+
+        let mut body = serde_json::json!({
+            "model": &self.model,
+            "max_tokens": self.max_tokens,
+            "messages": api_messages,
+            "tools": api_tools,
+        });
+
+        if let Some(sys) = system_content {
+            body["system"] = Value::String(sys);
+        }
+
+        body
+    }
+
+    /// 将单条 Message 转换为 Anthropic API 格式
+    ///
+    /// Anthropic 的消息转换比 OpenAI 复杂：
+    /// - 普通消息：{role, content: "text"}
+    /// - 带工具调用的 assistant：{role: "assistant", content: [{type: "text"}, {type: "tool_use"}]}
+    /// - 工具结果：{role: "user", content: [{type: "tool_result", tool_use_id, content}]}
+    fn convert_message_for_tools(&self, msg: &Message) -> Value {
+        match msg.role {
+            // 工具结果：Anthropic 将其作为 user 消息的 content block
+            // （与 OpenAI 的 role: "tool" 不同）
+            Role::Tool => {
+                serde_json::json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": msg.tool_call_id.as_deref().unwrap_or(""),
+                        "content": &msg.content,
+                    }]
+                })
+            }
+            // 带工具调用的 assistant 消息：用 content blocks 表示
+            Role::Assistant if msg.tool_calls.is_some() => {
+                let mut content_blocks: Vec<Value> = Vec::new();
+
+                // 先加文本块（如果有思考内容）
+                if !msg.content.is_empty() {
+                    content_blocks.push(serde_json::json!({
+                        "type": "text",
+                        "text": &msg.content,
+                    }));
+                }
+
+                // 再加工具调用块
+                for tc in msg.tool_calls.as_ref().unwrap() {
+                    content_blocks.push(serde_json::json!({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        // Anthropic 的 input 直接用 JSON 对象，不需要字符串化
+                        "input": tc.arguments,
+                    }));
+                }
+
+                serde_json::json!({
+                    "role": "assistant",
+                    "content": content_blocks,
+                })
+            }
+            // 普通 user / assistant 消息
+            _ => {
+                serde_json::json!({
+                    "role": msg.role.as_str(),
+                    "content": &msg.content,
+                })
+            }
+        }
+    }
+
+    /// 解析 Anthropic 工具调用响应
+    ///
+    /// Anthropic 响应格式：
+    /// {
+    ///   "content": [
+    ///     {"type": "text", "text": "让我查看..."},
+    ///     {"type": "tool_use", "id": "toolu_xxx", "name": "bash", "input": {"command": "ls"}}
+    ///   ],
+    ///   "stop_reason": "tool_use" | "end_turn"
+    /// }
+    ///
+    /// 与 OpenAI 的关键区别：
+    /// - 文本和工具调用都在 content blocks 数组中混合存在
+    /// - input 直接是 JSON 对象（不是字符串）
+    fn parse_tool_response(&self, response_text: &str) -> Result<LlmResponse> {
+        let json: Value = serde_json::from_str(response_text)
+            .map_err(|e| anyhow::anyhow!("解析工具调用响应 JSON 失败: {}", e))?;
+
+        let content_blocks = json["content"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("响应中没有 content 数组"))?;
+
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+
+        for block in content_blocks {
+            match block["type"].as_str() {
+                Some("text") => {
+                    if let Some(text) = block["text"].as_str() {
+                        if !text.is_empty() {
+                            text_parts.push(text.to_string());
+                        }
+                    }
+                }
+                Some("tool_use") => {
+                    tool_calls.push(ToolCall {
+                        id: block["id"].as_str().unwrap_or("").to_string(),
+                        name: block["name"].as_str().unwrap_or("").to_string(),
+                        // Anthropic 直接返回 JSON 对象，无需额外解析
+                        arguments: block["input"].clone(),
+                    });
+                }
+                _ => {} // 忽略未知类型（前向兼容）
+            }
+        }
+
+        // 合并所有文本块
+        let content = if text_parts.is_empty() {
+            None
+        } else {
+            Some(text_parts.join(""))
+        };
+
+        Ok(LlmResponse {
+            content,
+            tool_calls,
+        })
     }
 }
 
@@ -264,5 +464,43 @@ impl LlmProvider for AnthropicProvider {
             // 异常结束兜底
             yield Ok(StreamChunk::Done);
         })
+    }
+
+    /// Phase 3: 带工具定义的非流式对话（Anthropic 格式）
+    ///
+    /// 工作流程与 OpenAI 类似，但 API 格式差异很大：
+    /// - 工具定义用 input_schema
+    /// - 响应中 content blocks 混合了文本和工具调用
+    /// - stop_reason 为 "tool_use" 表示需要调用工具
+    async fn chat_with_tools(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<LlmResponse> {
+        let body = self.build_tool_request_body(messages, tools);
+
+        let response = self
+            .client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("发送工具调用请求失败: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Anthropic API 错误 {}: {}", status, text);
+        }
+
+        let response_text = response
+            .text()
+            .await
+            .map_err(|e| anyhow::anyhow!("读取响应文本失败: {}", e))?;
+
+        self.parse_tool_response(&response_text)
     }
 }

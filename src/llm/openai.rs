@@ -4,15 +4,17 @@
 /// 使用方法：只需修改 base_url 和 model，其余逻辑完全复用。
 ///
 /// Phase 2 变更：新增 chat_stream() 方法，实现 SSE 流式输出
+/// Phase 3 变更：新增 chat_with_tools() 方法，支持工具调用
 
 use anyhow::{Context, Result};
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::pin::Pin;
 
-use crate::llm::{LlmProvider, Message, StreamChunk};
+use crate::llm::{LlmProvider, LlmResponse, Message, Role, StreamChunk, ToolCall, ToolDefinition};
 
 // ────────────────────────────────────────────────────────────
 // Provider 结构体
@@ -46,6 +48,161 @@ impl OpenAIProvider {
             "https://api.deepseek.com/v1".to_string(),
             "deepseek-chat".to_string(),
         )
+    }
+
+    // ── Phase 3: 工具调用辅助方法 ──────────────────────────────
+
+    /// 构建带工具定义的请求体
+    ///
+    /// OpenAI 工具调用 API 格式：
+    /// - tools 数组：[{type: "function", function: {name, description, parameters}}]
+    /// - 消息格式需要处理三种新情况：
+    ///   1. 普通消息：{role, content}（不变）
+    ///   2. 带工具调用的 assistant 消息：{role: "assistant", tool_calls: [...]}
+    ///   3. 工具结果消息：{role: "tool", tool_call_id: "...", content: "..."}
+    fn build_tool_request_body(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Value {
+        // 转换消息列表，处理不同角色的格式差异
+        let api_messages: Vec<Value> = messages
+            .iter()
+            .map(|msg| match msg.role {
+                // 工具结果消息：需要 tool_call_id 来关联回对应的工具调用
+                Role::Tool => {
+                    serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": msg.tool_call_id.as_deref().unwrap_or(""),
+                        "content": &msg.content,
+                    })
+                }
+                // 带工具调用的 assistant 消息：重放历史时 API 要求包含原始的 tool_calls
+                Role::Assistant if msg.tool_calls.is_some() => {
+                    let tool_calls: Vec<Value> = msg
+                        .tool_calls
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(|tc| {
+                            serde_json::json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    // OpenAI 格式要求 arguments 是 JSON 字符串
+                                    "arguments": tc.arguments.to_string(),
+                                }
+                            })
+                        })
+                        .collect();
+
+                    let mut obj = serde_json::json!({
+                        "role": "assistant",
+                        "tool_calls": tool_calls,
+                    });
+                    // content 字段：有内容则加上，否则设为 null
+                    if !msg.content.is_empty() {
+                        obj["content"] = Value::String(msg.content.clone());
+                    }
+                    obj
+                }
+                // 普通消息：user / assistant / system
+                _ => {
+                    serde_json::json!({
+                        "role": msg.role.as_str(),
+                        "content": &msg.content,
+                    })
+                }
+            })
+            .collect();
+
+        // 转换工具定义为 OpenAI 格式
+        let api_tools: Vec<Value> = tools
+            .iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    }
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "model": &self.model,
+            "messages": api_messages,
+            "tools": api_tools,
+        })
+    }
+
+    /// 解析 OpenAI 工具调用响应
+    ///
+    /// OpenAI 响应格式：
+    /// {
+    ///   "choices": [{
+    ///     "message": {
+    ///       "content": "可选的文本",
+    ///       "tool_calls": [{
+    ///         "id": "call_xxx",
+    ///         "type": "function",
+    ///         "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
+    ///       }]
+    ///     },
+    ///     "finish_reason": "tool_calls" | "stop"
+    ///   }]
+    /// }
+    fn parse_tool_response(&self, response_text: &str) -> Result<LlmResponse> {
+        let json: Value = serde_json::from_str(response_text)
+            .context("解析工具调用响应 JSON 失败")?;
+
+        let choice = json["choices"]
+            .get(0)
+            .ok_or_else(|| anyhow::anyhow!("响应中没有 choices"))?;
+
+        let message = &choice["message"];
+
+        // 提取文本内容（纯工具调用时可能为 null）
+        let content = message["content"]
+            .as_str()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+
+        // 提取工具调用列表
+        let tool_calls = if let Some(calls) = message["tool_calls"].as_array() {
+            calls
+                .iter()
+                .map(|call| {
+                    let id = call["id"].as_str().unwrap_or("").to_string();
+                    let name = call["function"]["name"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+
+                    // OpenAI 返回的 arguments 是 JSON 字符串，需要解析为 Value
+                    // 为什么是字符串？这是 OpenAI API 的设计决定
+                    let args_str = call["function"]["arguments"].as_str().unwrap_or("{}");
+                    let arguments: Value = serde_json::from_str(args_str)
+                        .unwrap_or(Value::Object(serde_json::Map::new()));
+
+                    ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        Ok(LlmResponse {
+            content,
+            tool_calls,
+        })
     }
 }
 
@@ -272,5 +429,44 @@ impl LlmProvider for OpenAIProvider {
             // 如果流正常结束但没收到 [DONE]（某些 API 实现不规范），也发送结束信号
             yield Ok(StreamChunk::Done);
         })
+    }
+
+    /// Phase 3: 带工具定义的非流式对话
+    ///
+    /// 工作流程：
+    /// 1. 将 messages + tools 转换为 OpenAI API 格式
+    /// 2. 发送 HTTP 请求
+    /// 3. 解析响应中的 content 和 tool_calls
+    /// 4. 返回统一的 LlmResponse
+    async fn chat_with_tools(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<LlmResponse> {
+        let body = self.build_tool_request_body(messages, tools);
+
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .context("发送工具调用请求失败，请检查网络连接")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            anyhow::bail!("API 返回错误 {}: {}", status, error_text);
+        }
+
+        let response_text = response
+            .text()
+            .await
+            .context("读取响应文本失败")?;
+
+        self.parse_tool_response(&response_text)
     }
 }

@@ -7,6 +7,10 @@
 /// - 类型定义移至 types.rs，这里通过 pub use 重新导出
 /// - 新增 chat_stream() 方法支持流式输出
 /// - 新增 anthropic 模块
+///
+/// Phase 3 变更：
+/// - 新增 chat_with_tools() 方法，支持带工具定义的对话
+/// - 返回 LlmResponse（包含文本 + 工具调用）
 
 pub mod types;
 pub mod openai;
@@ -24,6 +28,7 @@ use std::pin::Pin;
 ///
 /// Phase 1：只有 chat()
 /// Phase 2：新增 chat_stream()，返回异步 token 流
+/// Phase 3：新增 chat_with_tools()，支持工具调用
 ///
 /// 为什么用 trait object（Box<dyn LlmProvider>）而不是泛型？
 /// - 运行时根据环境变量选择 provider，需要动态分发
@@ -48,4 +53,20 @@ pub trait LlmProvider: Send + Sync {
         &'a self,
         messages: &'a [Message],
     ) -> Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send + 'a>>;
+
+    /// Phase 3: 带工具定义的对话（非流式）
+    ///
+    /// 为什么非流式？Agent Loop 需要完整响应才能判断是否包含工具调用。
+    /// 流式传输下无法预知响应结构（工具调用信息分散在多个 chunk 中），
+    /// 必须等待完整结果才能决定下一步动作。
+    ///
+    /// 为什么加新方法而不是修改 chat() 的签名？
+    /// 1. 向后兼容：现有的 chat() 调用者不受影响
+    /// 2. 返回类型不同：chat() 返回 String，这里返回更丰富的 LlmResponse
+    /// 3. 关注点分离：普通对话不需要处理工具调用的复杂逻辑
+    async fn chat_with_tools(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<LlmResponse>;
 }
