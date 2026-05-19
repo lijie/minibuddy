@@ -41,6 +41,11 @@ fn log(msg: &str) {
     }
 }
 
+/// 公开的日志接口（供 main.rs 等外部模块使用）
+pub fn log_info(msg: &str) {
+    log(msg);
+}
+
 /// 写入多行日志（带缩进，不加时间戳前缀）
 fn log_block(header: &str, body: &str) {
     if let Ok(mut file) = std::fs::OpenOptions::new()

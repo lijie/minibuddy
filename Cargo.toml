@@ -30,3 +30,7 @@ async-stream = "0.3"        # stream! 宏，简化异步 Stream 生成
 ratatui = "0.29"             # 终端 UI 框架
 crossterm = { version = "0.28", features = ["event-stream"] }  # 跨平台终端操作
 unicode-width = "0.2"        # Unicode 显示宽度计算（中文字符占 2 列）
+
+# 配置系统（Phase 6）
+toml = "0.8"                 # TOML 配置文件解析
+dirs = "6"                   # 跨平台获取 home 目录路径
