@@ -20,6 +20,7 @@ use crate::llm::{LlmProvider, LlmResponse, Message, ToolCall};
 use crate::tools::sandbox::{self, PermissionLevel};
 use crate::tools::ToolRegistry;
 use crate::tui::event::AgentEvent;
+use crate::context::ContextManager;
 
 /// 最大工具调用轮次（安全阀，防止无限循环）
 const MAX_ITERATIONS: usize = 10;
@@ -180,8 +181,10 @@ pub struct Agent {
     provider: Box<dyn LlmProvider>,
     tool_registry: ToolRegistry,
     messages: Vec<Message>,
-    /// 向 TUI 发送事件的 channel（Phase 5 新增）
+    /// 向 TUI 发送事件的 channel
     event_tx: mpsc::Sender<AgentEvent>,
+    /// 上下文管理器（Phase 7）：token 估算 + 截断
+    context_manager: ContextManager,
 }
 
 impl Agent {
@@ -199,7 +202,18 @@ impl Agent {
             tool_registry,
             messages: vec![Message::system(system_prompt)],
             event_tx,
+            context_manager: ContextManager::default(),
         }
+    }
+
+    /// 获取消息历史（用于会话保存）
+    pub fn get_messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// 设置消息历史（用于会话加载）
+    pub fn set_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
     }
 
     /// 运行一次完整的 Agent 交互
@@ -230,6 +244,13 @@ impl Agent {
 
             // ── 思考：通知 TUI ──
             log(&format!("── 第 {} 轮迭代 ──", iterations));
+
+            // Phase 7：上下文截断——确保消息不超过 token 限制
+            let removed = self.context_manager.truncate_if_needed(&mut self.messages);
+            if removed > 0 {
+                log(&format!("⚠ 上下文截断：移除了 {} 条旧消息", removed));
+            }
+
             log_messages(&self.messages);
 
             let _ = self

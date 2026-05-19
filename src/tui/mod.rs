@@ -82,14 +82,23 @@ impl App {
                 KeyCode::Enter => {
                     if !self.input_buffer.is_empty() {
                         let input = std::mem::take(&mut self.input_buffer);
-                        // 在聊天历史中显示用户输入
-                        self.chat_history.push(ChatEntry {
-                            role: ChatRole::User,
-                            content: input.clone(),
-                        });
-                        // 发送到 Agent 任务
-                        let _ = self.user_tx.send(UserAction::Submit(input)).await;
-                        self.input_mode = InputMode::WaitingForAgent;
+
+                        if input.starts_with('/') {
+                            // 斜杠命令：/save, /load, /new 等
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::Status,
+                                content: input.clone(),
+                            });
+                            let _ = self.user_tx.send(UserAction::Command(input)).await;
+                        } else {
+                            // 普通输入：发送给 Agent
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::User,
+                                content: input.clone(),
+                            });
+                            let _ = self.user_tx.send(UserAction::Submit(input)).await;
+                            self.input_mode = InputMode::WaitingForAgent;
+                        }
                     }
                 }
                 KeyCode::Char(c) => {

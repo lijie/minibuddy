@@ -46,6 +46,8 @@ pub enum AgentEvent {
 pub enum UserAction {
     /// 用户提交了一条输入
     Submit(String),
+    /// 用户执行斜杠命令（/save, /load, /new）
+    Command(String),
     /// 用户请求退出
     Quit,
 }

@@ -14,6 +14,7 @@ mod tools;
 mod agent;
 mod tui;
 mod config;
+mod context;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -108,7 +109,53 @@ async fn agent_task(mut agent: Agent, mut user_rx: mpsc::Receiver<UserAction>) {
                     eprintln!("Agent error: {}", e);
                 }
             }
+            UserAction::Command(cmd) => {
+                handle_command(&mut agent, &cmd).await;
+            }
             UserAction::Quit => break,
+        }
+    }
+}
+
+/// 处理斜杠命令
+async fn handle_command(agent: &mut Agent, cmd: &str) {
+    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+    let command = parts[0];
+
+    match command {
+        "/save" => {
+            match context::storage::save_session(agent.get_messages()) {
+                Ok(meta) => {
+                    agent::log_info(&format!("会话已保存: {} ({})", meta.title, meta.id));
+                }
+                Err(e) => {
+                    agent::log_info(&format!("保存会话失败: {}", e));
+                }
+            }
+        }
+        "/load" => {
+            match context::storage::load_latest_session() {
+                Ok(Some(messages)) => {
+                    let count = messages.len();
+                    agent.set_messages(messages);
+                    agent::log_info(&format!("已加载最近会话 ({} 条消息)", count));
+                }
+                Ok(None) => {
+                    agent::log_info("没有已保存的会话");
+                }
+                Err(e) => {
+                    agent::log_info(&format!("加载会话失败: {}", e));
+                }
+            }
+        }
+        "/new" => {
+            // 保存当前会话再重置
+            let _ = context::storage::save_session(agent.get_messages());
+            agent.set_messages(Vec::new());
+            agent::log_info("新会话已开始（旧会话已自动保存）");
+        }
+        _ => {
+            agent::log_info(&format!("未知命令: {}", cmd));
         }
     }
 }
