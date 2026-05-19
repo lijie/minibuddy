@@ -385,3 +385,38 @@
 - 文件日志可以用 `tail -f mini-buddy.log` 实时查看，不干扰 TUI
 - 日志格式化展示完整消息历史（role 区分）、LLM 响应（content + tool_calls）、工具执行结果
 - 教学意义：学习者可以通过日志理解 Agent 每一步在做什么
+
+---
+
+## Phase 6：配置系统
+
+### D6-1：TOML 配置文件 + 环境变量覆盖
+
+**决策**：使用 `~/.mini-buddy/config.toml` 作为持久化配置，环境变量优先级高于配置文件。
+
+**原因**：
+- TOML 格式人类可读、Rust 生态支持好（`toml` crate 是 Cargo 自身用的格式）
+- 环境变量覆盖配置文件符合十二因素应用原则和 CI/CD 使用习惯
+- 配置文件不存在时自动生成默认模板——零配置即可运行
+
+---
+
+### D6-2：Provider 配置统一用 type 字段分发
+
+**决策**：`ProviderConfig` 用 `type: "openai" | "anthropic"` 字段决定走哪个 Provider 实现，而非按名字硬编码匹配。
+
+**原因**：
+- 用户可以自定义任意名称的 provider（如 `[providers.my-local-llm]`），只要 type 正确就能工作
+- 新增 OpenAI 兼容服务（如 Groq、Kimi）只需添加配置条目，不改代码
+- `create_provider()` 从按名字 match 改为按 type match，扩展性从 O(n) 变为 O(1)
+
+---
+
+### D6-3：api_key 解析优先级：环境变量 > 配置文件
+
+**决策**：`ProviderConfig::resolve_api_key()` 先查 `api_key_env` 指定的环境变量，找不到再用配置文件中的 `api_key` 字段。
+
+**原因**：
+- 安全：避免密钥写入文件被意外提交（`config.toml` 可能被 dotfiles 仓库同步）
+- 灵活：多环境（开发/生产）通过环境变量切换密钥
+- 兼容：本地开发者可以直接写 `api_key` 字段图方便，不影响安全用户
