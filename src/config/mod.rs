@@ -26,6 +26,9 @@ pub struct Config {
     pub default_provider: String,
     /// 所有已配置的 provider
     pub providers: HashMap<String, ProviderConfig>,
+    /// MCP 服务器配置（可选，Phase 8）
+    #[serde(default)]
+    pub mcp: Option<HashMap<String, McpServerConfig>>,
 }
 
 /// 单个 Provider 的配置
@@ -48,6 +51,41 @@ pub struct ProviderConfig {
     /// 最大输出 token 数（Anthropic 必填，OpenAI 可选）
     #[serde(default)]
     pub max_tokens: Option<u32>,
+}
+
+/// MCP 服务器配置（Phase 8）
+///
+/// MCP (Model Context Protocol) 允许 LLM 通过标准化协议与外部工具交互。
+/// 每个 MCP 服务器是一个独立的进程，通过 stdin/stdout 进行 JSON-RPC 通信。
+///
+/// 配置示例（TOML 格式）：
+/// ```toml
+/// [mcp.filesystem]
+/// command = "mcp-filesystem"
+/// args = ["/home/user/projects"]
+///
+/// [mcp.web-browser]
+/// command = "/usr/local/bin/mcp-browser"
+/// args = []
+/// env = { BROWSER_TIMEOUT = "30" }
+/// startup_timeout_secs = 10
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    /// 可执行文件路径（绝对路径或在 PATH 中的命令）
+    pub command: String,
+    /// 命令行参数
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// 环境变量（可选，会与当前进程环境合并）
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
+    /// 可选：命令的工作目录（如果未指定，使用当前目录）
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// 可选：启动超时时间（秒，默认 5 秒）
+    #[serde(default)]
+    pub startup_timeout_secs: Option<u64>,
 }
 
 // ────────────────────────────────────────────────────────────
@@ -96,11 +134,23 @@ pub fn save_config(config: &Config) -> Result<()> {
     let content = toml::to_string_pretty(config)
         .context("序列化配置失败")?;
 
-    // 加上注释头
+    // 加上注释头（Phase 8 扩展：添加 MCP 文档）
     let with_header = format!(
         "# mini-buddy 配置文件\n\
          # 路径: {}\n\
          # 文档: https://github.com/xxx/mini-buddy#configuration\n\n\
+         # Phase 6: 多 LLM Provider 支持 (deepseek, anthropic, ollama 等)\n\
+         # Phase 8: MCP (Model Context Protocol) 服务器集成\n\
+         #\n\
+         # MCP 配置示例：\n\
+         # [mcp.filesystem]\n\
+         # command = \"mcp-filesystem\"\n\
+         # args = [\"/home/user/projects\"]\n\
+         # startup_timeout_secs = 10\n\
+         #\n\
+         # [mcp.web-browser]\n\
+         # command = \"/usr/local/bin/mcp-browser\"\n\
+         # env = {{ BROWSER_TIMEOUT = \"30\" }}\n\n\
          {}", path.display(), content
     );
 
@@ -117,6 +167,7 @@ pub fn save_config(config: &Config) -> Result<()> {
 /// 生成内置默认配置
 ///
 /// 包含三个预配置的 provider：deepseek、anthropic、ollama
+/// 以及示例 MCP 服务器配置（注释形式，供用户启用）
 fn default_config() -> Config {
     let mut providers = HashMap::new();
 
@@ -156,9 +207,25 @@ fn default_config() -> Config {
         },
     );
 
+    // Phase 8：示例 MCP 服务器配置
+    let mut mcp_servers = HashMap::new();
+
+    // 示例：文件系统工具（来自 @anthropic/mcp-filesystem）
+    mcp_servers.insert(
+        "filesystem".to_string(),
+        McpServerConfig {
+            command: "mcp-filesystem".to_string(),
+            args: vec![],
+            env: None,
+            cwd: None,
+            startup_timeout_secs: Some(5),
+        },
+    );
+
     Config {
         default_provider: "deepseek".to_string(),
         providers,
+        mcp: Some(mcp_servers),
     }
 }
 
@@ -216,5 +283,16 @@ impl Config {
                 name,
                 self.providers.keys().collect::<Vec<_>>()
             ))
+    }
+
+    /// 获取 MCP 服务器配置（如果存在）
+    /// Phase 8：新增方法用于访问 MCP 配置
+    pub fn mcp_servers(&self) -> Option<&HashMap<String, McpServerConfig>> {
+        self.mcp.as_ref()
+    }
+
+    /// 检查是否启用了 MCP
+    pub fn has_mcp_enabled(&self) -> bool {
+        self.mcp.as_ref().map(|m| !m.is_empty()).unwrap_or(false)
     }
 }
