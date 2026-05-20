@@ -7,18 +7,20 @@
 ///
 /// 1. **Transport** (`transport.rs`): JSON-RPC communication over stdio
 /// 2. **Types** (`types.rs`): MCP protocol data structures
-/// 3. **Server Management** (Phase 8c): Process lifecycle and tool discovery
+/// 3. **Server Management** (`server_manager.rs`): Process lifecycle and tool discovery
 /// 4. **Tool Adapter** (Phase 8d): Adapting MCP tools to our Tool trait
 ///
 /// Phases:
 /// - Phase 8a: Config system support ✅
-/// - Phase 8b: Transport layer (this phase)
-/// - Phase 8c: Server management
+/// - Phase 8b: Transport layer ✅
+/// - Phase 8c: Server management (this phase)
 /// - Phase 8d: Tool adapter
 /// - Phase 8e: Full integration
 
 pub mod types;
 pub mod transport;
+pub mod server_manager;
 
-// Re-export key types for convenience
+// Re-export key types and utilities for convenience
 pub use transport::McpTransport;
+pub use server_manager::{McpServerManager, McpServerRegistry};
