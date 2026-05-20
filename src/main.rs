@@ -15,6 +15,7 @@ mod agent;
 mod tui;
 mod config;
 mod context;
+mod mcp;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
