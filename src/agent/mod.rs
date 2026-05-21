@@ -260,10 +260,21 @@ impl Agent {
                 })
                 .await;
 
-            let response: LlmResponse = self
+            let response: LlmResponse = match self
                 .provider
                 .chat_with_tools(&self.messages, &tool_defs)
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log(&format!("✗ LLM 调用失败: {}", e));
+                    let _ = self
+                        .event_tx
+                        .send(AgentEvent::Error(format!("LLM 调用失败: {}", e)))
+                        .await;
+                    return Err(e);
+                }
+            };
 
             log_response(&response);
 
@@ -371,7 +382,10 @@ impl Agent {
 
         match tool.execute(tool_call.arguments.clone()).await {
             Ok(result) => result,
-            Err(e) => format!("工具执行出错: {}", e),
+            Err(e) => {
+                log(&format!("✗ 工具 '{}' 执行出错: {}", tool_call.name, e));
+                format!("工具执行出错: {}", e)
+            }
         }
     }
 

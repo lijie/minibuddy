@@ -550,3 +550,37 @@
 - `block_on()` 在 tokio 运行时中会 panic（不能在 async 上下文中嵌套 block）
 - Fire-and-forget kill 足够——进程在 OS 层面会被 SIGKILL，无需等待退出码
 - 另提供 `shutdown()` async 方法供需要优雅关闭的场景使用
+
+---
+
+## 错误处理与日志增强
+
+### D-E1：OpenAI 类 Provider 启动时验证 API Key
+
+**决策**：`create_provider()` 中 OpenAI 分支改用 `ok_or_else()` 验证 key 存在，本地服务（localhost）豁免。
+
+**原因**：
+- 原 `unwrap_or_default()` 在 key 缺失时传空字符串，运行时才收到 401——错误信息难以理解
+- Fail-fast 原则：启动时就告诉用户缺什么环境变量，不让他进 TUI 后才发现
+- Ollama 等本地服务确实不需要 key，通过 base_url 包含 `localhost` 判断豁免
+
+---
+
+### D-E2：LLM 调用失败发送 AgentEvent::Error 而非仅 propagate
+
+**决策**：`Agent::run()` 中 `chat_with_tools()` 失败时，先日志记录 + 发送 `AgentEvent::Error`，再返回 `Err`。
+
+**原因**：
+- `AgentEvent::Error` 已定义但从未使用——TUI 已实现红色显示逻辑，只是没人触发
+- 用户在 TUI 中看到红色错误比看不到任何反馈好（原来错误只去了 eprintln，TUI 模式下不可见）
+- 日志同时记录，方便 `tail -f mini-buddy.log` 排查
+
+---
+
+### D-E3：agent_task 错误走日志而非 eprintln
+
+**决策**：`main.rs` 中 `agent_task()` 的错误处理从 `eprintln!` 改为 `agent::log_info()`。
+
+**原因**：
+- TUI raw mode 下 eprintln 破坏界面（D5-5 已记录此原则）
+- Error event 已由 Agent.run() 内部发送给 TUI，agent_task 只需做补充日志

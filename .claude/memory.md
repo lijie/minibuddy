@@ -41,6 +41,8 @@ src/
 - **会话存储** `~/.mini-buddy/sessions/{timestamp}.json`
 - **斜杠命令** `/save /load /new` 走 `UserAction::Command`，不进入 Agent Loop
 - **日志** `crate::agent::log_info()` 写文件 `mini-buddy.log`，TUI 模式下禁止 eprintln
+- **错误显示** LLM 调用失败 → 日志 + `AgentEvent::Error` → TUI 红色显示 + 恢复输入模式
+- **API Key 验证** create_provider() 启动时 fail-fast，localhost 豁免不需 key
 
 ### MCP 实现要点
 - `McpTransport::spawn(cmd, args, env, cwd)` — 进程管道 + JSON-RPC 2.0
@@ -54,6 +56,11 @@ src/
 - `llm/` 中有 ~10 个 dead_code warning（Phase 2 的 stream 相关代码未在 TUI 模式使用）
 - `initialized` 通知未单独发送（大多数 server 仅需 initialize 响应即可工作）
 - `McpServerRegistry` 已实现但未使用（留给未来热加载/卸载 server 场景）
+
+### 测试
+- 54 项测试全部通过（43 unit + 6 integration + 5 config）
+- `tests/mcp_test_server.py` — 极简 Python MCP server（echo + current_time），用于端到端测试
+- MCP 测试配置已写入 `~/.mini-buddy/config.toml`（[mcp.test] 段）
 
 ### Phase 9+ 待做
 - 流式 token 渲染到 TUI（需 chat_stream_with_tools 或混合模式）

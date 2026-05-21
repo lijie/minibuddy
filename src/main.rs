@@ -34,9 +34,25 @@ fn create_provider(cfg: &config::Config) -> Result<Box<dyn llm::LlmProvider>> {
 
     match provider_cfg.provider_type.as_str() {
         "openai" => {
-            let api_key = provider_cfg.resolve_api_key().unwrap_or_default();
             let base_url = provider_cfg.resolve_base_url();
             let model = provider_cfg.model.clone();
+
+            // Ollama 等本地服务不需要 API key，其余必须提供
+            let is_local = base_url.contains("localhost") || base_url.contains("127.0.0.1");
+            let api_key = if is_local {
+                provider_cfg.resolve_api_key().unwrap_or_default()
+            } else {
+                provider_cfg.resolve_api_key().ok_or_else(|| {
+                    let env_hint = provider_cfg
+                        .api_key_env
+                        .as_deref()
+                        .unwrap_or("OPENAI_API_KEY");
+                    anyhow::anyhow!(
+                        "Provider '{}' 需要 API key。请设置 {} 环境变量或在配置文件中填写 api_key",
+                        provider_name, env_hint
+                    )
+                })?
+            };
 
             Ok(Box::new(llm::openai::OpenAIProvider::new(
                 api_key, base_url, model,
@@ -81,12 +97,19 @@ async fn main() -> Result<()> {
 
     // ── 4. 创建 Agent ───────────────────────────────────────
     let mut tool_registry = create_default_registry();
-    
+
     // ── Phase 8: 注册 MCP 工具 ───────────────────────────────
     if let Err(e) = tools::register_mcp_tools(&mut tool_registry, &cfg).await {
         agent::log_info(&format!("⚠ MCP 工具注册失败: {}", e));
     }
-    
+
+    // 记录已注册的工具列表
+    let tool_names = tool_registry.list_names();
+    agent::log_info(&format!(
+        "已注册 {} 个工具: {:?}",
+        tool_names.len(), tool_names
+    ));
+
     let agent = Agent::new(provider, tool_registry, agent_tx);
 
     // ── 5. 启动 Agent task ──────────────────────────────────
@@ -113,7 +136,8 @@ async fn agent_task(mut agent: Agent, mut user_rx: mpsc::Receiver<UserAction>) {
         match action {
             UserAction::Submit(input) => {
                 if let Err(e) = agent.run(&input).await {
-                    eprintln!("Agent error: {}", e);
+                    agent::log_info(&format!("✗ Agent 执行失败: {}", e));
+                    // Error event 已由 Agent.run() 内部发送给 TUI
                 }
             }
             UserAction::Command(cmd) => {
