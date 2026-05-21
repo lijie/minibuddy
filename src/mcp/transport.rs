@@ -10,6 +10,7 @@
 use super::types::*;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -35,17 +36,36 @@ impl McpTransport {
     /// # Arguments
     /// * `command` - Executable path or command name
     /// * `args` - Command line arguments
+    /// * `env` - Optional environment variables to set for the process
+    /// * `cwd` - Optional working directory for the process
     ///
     /// # Errors
     /// Returns error if process spawn fails or pipes can't be set up
-    pub async fn spawn(command: &str, args: Vec<String>) -> Result<Self> {
+    pub async fn spawn(
+        command: &str,
+        args: Vec<String>,
+        env: Option<&HashMap<String, String>>,
+        cwd: Option<&str>,
+    ) -> Result<Self> {
         use std::process::Stdio;
-        
+
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        // 设置环境变量（与当前进程环境合并）
+        if let Some(env_vars) = env {
+            for (key, value) in env_vars {
+                cmd.env(key, value);
+            }
+        }
+
+        // 设置工作目录
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
 
         let mut process = cmd.spawn()
             .context(format!("Failed to spawn MCP server: {}", command))?;
@@ -149,20 +169,38 @@ impl McpTransport {
                     bail!("Error response ID mismatch");
                 }
             } else {
-                // Not a valid JSON-RPC response - could be server output
-                // Log it but continue trying to read actual responses
-                eprintln!("MCP: Unexpected response line: {}", line);
+                // Not a valid JSON-RPC response - could be server log output
+                // 用文件日志而非 eprintln!，避免 TUI raw mode 下的输出混乱
+                crate::agent::log_info(&format!("MCP: Unexpected response line: {}", line));
                 continue;
             }
         }
+    }
+
+    /// 关闭 MCP 服务器进程
+    ///
+    /// 尝试优雅关闭：先关闭 stdin（服务器应收到 EOF 后自行退出），
+    /// 如果进程仍在运行则强制 kill。
+    #[allow(dead_code)]
+    pub async fn shutdown(&self) {
+        // 关闭 stdin，通知服务器没有更多输入
+        drop(self.stdin.lock().await);
+
+        // 尝试 kill 进程
+        let mut process = self.process.lock().await;
+        let _ = process.kill().await;
     }
 }
 
 impl Drop for McpTransport {
     fn drop(&mut self) {
-        // Attempt to kill the process when transport is dropped
-        // Note: This is a fire-and-forget attempt; we don't wait for it
-        // In a production system, you might want to handle this more carefully
+        // 尝试在 Drop 中 kill 进程
+        // 由于 Drop 是同步的，无法 await，使用 tokio spawn 做 fire-and-forget cleanup
+        let process = Arc::clone(&self.process);
+        tokio::spawn(async move {
+            let mut proc = process.lock().await;
+            let _ = proc.kill().await;
+        });
     }
 }
 

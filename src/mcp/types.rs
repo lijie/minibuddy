@@ -64,8 +64,8 @@ pub struct ToolsListResponse {
 pub struct McpTool {
     pub name: String,
     pub description: String,
-    #[serde(default)]
-    pub inputSchema: Value,  // JSON Schema for tool input
+    #[serde(default, rename = "inputSchema")]
+    pub input_schema: Value,  // JSON Schema for tool input
 }
 
 /// Response from tools/call RPC call
@@ -74,8 +74,8 @@ pub struct McpTool {
 pub struct ToolCallResponse {
     #[serde(default)]
     pub content: Vec<ToolResultContent>,
-    #[serde(default)]
-    pub isError: bool,  // true if tool execution failed
+    #[serde(default, rename = "isError")]
+    pub is_error: bool,  // true if tool execution failed
 }
 
 /// Content within a tool call response
@@ -88,13 +88,15 @@ pub enum ToolResultContent {
     #[serde(rename = "image")]
     Image {
         data: String,           // Base64-encoded image data
-        mimeType: String,       // e.g., "image/png"
+        #[serde(rename = "mimeType")]
+        mime_type: String,       // e.g., "image/png"
     },
-    
+
     #[serde(rename = "resource")]
     Resource {
         uri: String,            // Resource URI
-        mimeType: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
         #[serde(default)]
         text: Option<String>,   // Optional text representation
     },
@@ -118,6 +120,7 @@ impl JsonRpcRequest {
 
 impl ErrorObject {
     /// Create a parse error
+    #[allow(dead_code)]
     pub fn parse_error(message: impl Into<String>) -> Self {
         Self {
             code: -32700,
@@ -127,6 +130,7 @@ impl ErrorObject {
     }
 
     /// Create an invalid request error
+    #[allow(dead_code)]
     pub fn invalid_request(message: impl Into<String>) -> Self {
         Self {
             code: -32600,
@@ -136,6 +140,7 @@ impl ErrorObject {
     }
 
     /// Create a method not found error
+    #[allow(dead_code)]
     pub fn method_not_found(message: impl Into<String>) -> Self {
         Self {
             code: -32601,
@@ -145,6 +150,7 @@ impl ErrorObject {
     }
 
     /// Create an internal error
+    #[allow(dead_code)]
     pub fn internal_error(message: impl Into<String>) -> Self {
         Self {
             code: -32603,
@@ -154,6 +160,7 @@ impl ErrorObject {
     }
 
     /// Create a server error (codes -32768 to -32000)
+    #[allow(dead_code)]
     pub fn server_error(code: i32, message: impl Into<String>) -> Self {
         let code = if code >= -32768 && code <= -32000 {
             code
@@ -171,6 +178,7 @@ impl ErrorObject {
 impl ToolResultContent {
     /// Extract text from tool result content
     /// Returns the first text content found, or None if no text content exists
+    #[allow(dead_code)]
     pub fn as_text(&self) -> Option<String> {
         match self {
             Self::Text { text } => Some(text.clone()),
@@ -183,14 +191,14 @@ impl ToolResultContent {
     pub fn to_string_representation(&self) -> String {
         match self {
             Self::Text { text } => text.clone(),
-            Self::Image { data, mimeType } => {
-                format!("[Image: {}, size: {} bytes]", mimeType, data.len())
+            Self::Image { data, mime_type } => {
+                format!("[Image: {}, size: {} bytes]", mime_type, data.len())
             }
-            Self::Resource { uri, mimeType, text } => {
+            Self::Resource { uri, mime_type, text } => {
                 if let Some(t) = text {
-                    format!("[Resource: {} ({}): {}]", uri, mimeType, t)
+                    format!("[Resource: {} ({}): {}]", uri, mime_type, t)
                 } else {
-                    format!("[Resource: {} ({})]", uri, mimeType)
+                    format!("[Resource: {} ({})]", uri, mime_type)
                 }
             }
         }
@@ -262,10 +270,10 @@ mod tests {
         let tool: McpTool = serde_json::from_str(json).unwrap();
         assert_eq!(tool.name, "bash");
         assert_eq!(tool.description, "Execute a bash command");
-        
-        // Verify inputSchema is valid JSON Schema
-        assert_eq!(tool.inputSchema["type"], "object");
-        assert!(tool.inputSchema["properties"]["command"].is_object());
+
+        // Verify input_schema is valid JSON Schema
+        assert_eq!(tool.input_schema["type"], "object");
+        assert!(tool.input_schema["properties"]["command"].is_object());
     }
 
     #[test]

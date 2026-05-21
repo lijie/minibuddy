@@ -470,3 +470,83 @@
 - 与 LLM 对话输入明确区分——不会把 `/save` 发给模型
 - 命令在 agent_task 中同步处理，不经过 Agent Loop（不需要 LLM 参与）
 - 扩展简单：新增命令只需在 `handle_command()` 加 match arm
+
+---
+
+## Phase 8：MCP 支持
+
+### D8-1：MCP 工具通过 McpToolAdapter 实现 Tool trait
+
+**决策**：每个 MCP 工具包装为 `McpToolAdapter` 结构体，实现与内置工具相同的 `Tool` trait，注册到同一个 `ToolRegistry`。
+
+**原因**：
+- Agent Loop 零改动——不区分工具来源，统一走 `registry.get(name).execute(args)`
+- LLM 也无感知——工具定义格式完全一致
+- 适配器模式：MCP 的 `inputSchema` 直接作为 `parameters_schema()` 返回，无需转换
+
+---
+
+### D8-2：JSON-RPC over stdio，手动实现而非引入 MCP SDK
+
+**决策**：手写 JSON-RPC 2.0 协议（`types.rs` + `transport.rs`），不引入第三方 MCP client crate。
+
+**原因**：
+- 教学项目：展示 JSON-RPC 协议的本质（request id 匹配、error 结构）
+- 零新增依赖，协议本身极简（序列化 → 写 stdin → 读 stdout → 反序列化）
+- Rust 生态中成熟的 MCP client crate 尚少（2024 年协议刚稳定）
+
+---
+
+### D8-3：initialize 握手在 spawn 后立即执行
+
+**决策**：`McpServerManager::spawn()` 内部在创建 transport 后立即发送 `initialize` 请求，握手失败则整个 server 启动失败。
+
+**原因**：
+- MCP 规范要求 `initialize` → `initialized` 后才能调用 `tools/list`
+- Fail-fast：握手失败说明服务器不兼容或无法通信，越早发现越好
+- 握手中声明 `clientInfo` 和 `protocolVersion`，是良好的协议公民
+
+---
+
+### D8-4：单个 MCP 服务器失败不阻断应用启动
+
+**决策**：`register_mcp_tools()` 中用 `match` 捕获每个服务器的启动错误，记录警告后继续注册下一个。
+
+**原因**：
+- 用户可能配置了多个 MCP server，其中一个未安装不应影响其他功能
+- 内置工具（bash、read_file、write_file）始终可用，MCP 是增强而非必须
+- 日志中记录失败原因，用户可据此排查
+
+---
+
+### D8-5：McpServerManager 持有 Arc 共享给多个 McpToolAdapter
+
+**决策**：一个 server 的多个工具共享同一个 `Arc<McpServerManager>`，通过它的 `call_tool()` 方法调用。
+
+**原因**：
+- 一个 MCP server 可能提供 5-10 个工具，每个工具独立注册到 registry
+- 共享 transport 连接：所有工具复用同一个进程和管道，无需每个工具独立连接
+- Arc 保证生命周期：只要有一个工具引用存在，server 进程就不会被 drop
+
+---
+
+### D8-6：Transport spawn 接收 env/cwd 配置
+
+**决策**：`McpTransport::spawn()` 签名接收 `env: Option<&HashMap<String, String>>` 和 `cwd: Option<&str>`，映射到 `Command::env()` 和 `Command::current_dir()`。
+
+**原因**：
+- MCP server 常需要特定环境变量（API token、路径配置等）
+- 工作目录影响 server 的文件操作范围（如 filesystem server 的根目录）
+- 配置文件中已定义这些字段（`McpServerConfig.env` / `.cwd`），必须传递到实际进程
+
+---
+
+### D8-7：进程清理用 tokio::spawn fire-and-forget
+
+**决策**：`McpTransport` 的 `Drop` 中通过 `tokio::spawn` 异步 kill 子进程，而非阻塞等待。
+
+**原因**：
+- `Drop` 是同步的，无法直接 `.await`
+- `block_on()` 在 tokio 运行时中会 panic（不能在 async 上下文中嵌套 block）
+- Fire-and-forget kill 足够——进程在 OS 层面会被 SIGKILL，无需等待退出码
+- 另提供 `shutdown()` async 方法供需要优雅关闭的场景使用

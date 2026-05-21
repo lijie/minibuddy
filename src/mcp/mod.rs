@@ -23,6 +23,10 @@ pub mod server_manager;
 pub mod tool_adapter;
 
 // Re-export key types and utilities for convenience
+// 这些 re-export 为 tools/mod.rs 中的 MCP 集成和未来扩展提供入口
+#[allow(unused_imports)]
 pub use transport::McpTransport;
+#[allow(unused_imports)]
 pub use server_manager::{McpServerManager, McpServerRegistry};
+#[allow(unused_imports)]
 pub use tool_adapter::McpToolAdapter;

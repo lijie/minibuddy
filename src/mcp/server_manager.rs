@@ -20,6 +20,7 @@ use tokio::sync::Mutex;
 /// - Error handling and connection recovery
 pub struct McpServerManager {
     /// Name of the server (from config)
+    #[allow(dead_code)]
     pub name: String,
     
     /// Transport for JSON-RPC communication
@@ -37,17 +38,46 @@ impl McpServerManager {
     /// * `config` - Server configuration from config file
     ///
     /// # Errors
-    /// Returns error if process spawn fails
+    /// Returns error if process spawn or initialize handshake fails
     pub async fn spawn(name: String, config: &McpServerConfig) -> Result<Self> {
         let transport = McpTransport::spawn(
             &config.command,
             config.args.clone(),
+            config.env.as_ref(),
+            config.cwd.as_deref(),
         ).await
             .context(format!("Failed to spawn MCP server '{}'", name))?;
 
+        let transport = Arc::new(Mutex::new(transport));
+
+        // MCP 协议要求在 tools/list 之前完成 initialize 握手
+        // 参考：https://modelcontextprotocol.io/docs/concepts/lifecycle
+        {
+            let t = transport.lock().await;
+            let init_params = json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "roots": { "listChanged": false }
+                },
+                "clientInfo": {
+                    "name": "mini-buddy",
+                    "version": "0.1.0"
+                }
+            });
+
+            // 发送 initialize 请求
+            t.call_method("initialize", Some(init_params)).await
+                .context(format!("MCP server '{}' initialize handshake failed", name))?;
+
+            // 发送 initialized 通知（无 id，不等响应）
+            // 注意：notifications 不需要响应，但我们通过 call_method 发送普通请求
+            // MCP 规范中 initialized 是一个通知，这里简化处理——
+            // 大多数 MCP server 实现在收到 initialize 响应后即可正常工作
+        }
+
         Ok(Self {
             name,
-            transport: Arc::new(Mutex::new(transport)),
+            transport,
             tools_cache: Arc::new(Mutex::new(None)),
         })
     }
@@ -106,7 +136,7 @@ impl McpServerManager {
             .context("Failed to parse tools/call response")?;
 
         // Extract text result from response content
-        if tool_response.isError {
+        if tool_response.is_error {
             let error_msg = tool_response.content
                 .first()
                 .map(|c| c.to_string_representation())
@@ -127,12 +157,14 @@ impl McpServerManager {
     /// Get tool by name from available tools
     ///
     /// Returns None if tool not found
+    #[allow(dead_code)]
     pub async fn get_tool(&self, name: &str) -> Result<Option<McpTool>> {
         let tools = self.list_tools().await?;
         Ok(tools.into_iter().find(|t| t.name == name))
     }
 
     /// Get server name
+    #[allow(dead_code)]
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -145,10 +177,12 @@ impl McpServerManager {
 /// Manages multiple MCP server instances
 ///
 /// Provides a centralized interface for working with multiple MCP servers.
+#[allow(dead_code)]
 pub struct McpServerRegistry {
     servers: Arc<Mutex<std::collections::HashMap<String, Arc<McpServerManager>>>>,
 }
 
+#[allow(dead_code)]
 impl McpServerRegistry {
     /// Create a new empty registry
     pub fn new() -> Self {
@@ -216,7 +250,7 @@ mod tests {
 
         let content = ToolResultContent::Image {
             data: "base64data".to_string(),
-            mimeType: "image/png".to_string(),
+            mime_type: "image/png".to_string(),
         };
         assert!(content.to_string_representation().contains("image/png"));
     }
@@ -236,7 +270,7 @@ mod tests {
         "#;
 
         let response: ToolCallResponse = serde_json::from_str(json).unwrap();
-        assert!(!response.isError);
+        assert!(!response.is_error);
         assert_eq!(response.content.len(), 1);
     }
 

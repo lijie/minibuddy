@@ -287,11 +287,13 @@ impl Config {
 
     /// 获取 MCP 服务器配置（如果存在）
     /// Phase 8：新增方法用于访问 MCP 配置
+    #[allow(dead_code)]
     pub fn mcp_servers(&self) -> Option<&HashMap<String, McpServerConfig>> {
         self.mcp.as_ref()
     }
 
     /// 检查是否启用了 MCP
+    #[allow(dead_code)]
     pub fn has_mcp_enabled(&self) -> bool {
         self.mcp.as_ref().map(|m| !m.is_empty()).unwrap_or(false)
     }

@@ -108,7 +108,7 @@ impl ContextManager {
 
         // 策略：保留 messages[0]（system prompt）+ 从后往前保留尽可能多的消息
         let system_tokens = Self::estimate_message_tokens(&messages[0]);
-        let mut budget = self.max_tokens.saturating_sub(system_tokens);
+        let budget = self.max_tokens.saturating_sub(system_tokens);
 
         // 从后往前累积，找到可以保留的起始位置
         let mut keep_from = messages.len(); // 从这个 index 开始保留

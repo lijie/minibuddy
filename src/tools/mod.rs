@@ -211,7 +211,7 @@ async fn register_single_mcp_server(
         let adapter = McpToolAdapter::new(
             mcp_tool.name.clone(),
             mcp_tool.description.clone(),
-            mcp_tool.inputSchema.clone(),
+            mcp_tool.input_schema.clone(),
             Arc::clone(&server),
         );
         registry.register(Box::new(adapter));
