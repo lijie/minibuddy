@@ -21,8 +21,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::llm::ToolDefinition;
+use crate::mcp::tool_adapter::McpToolAdapter;
+use crate::mcp::server_manager::McpServerManager;
 
 // ────────────────────────────────────────────────────────────
 // Tool trait
@@ -131,4 +134,88 @@ pub fn create_default_registry() -> ToolRegistry {
     registry.register(Box::new(read_file::ReadFileTool));
     registry.register(Box::new(write_file::WriteFileTool));
     registry
+}
+
+// ────────────────────────────────────────────────────────────
+// MCP 工具注册（Phase 8）
+// ────────────────────────────────────────────────────────────
+
+/// 从配置文件中加载 MCP 服务器并注册其工具
+///
+/// 这是 Phase 8 集成的关键函数：
+/// 1. 读取配置中的 MCP 服务器列表
+/// 2. 为每个服务器创建 McpServerManager（生成进程）
+/// 3. 从服务器发现可用工具
+/// 4. 为每个工具创建 McpToolAdapter
+/// 5. 将 adapters 注册到 registry
+///
+/// 错误处理：
+/// - 如果 MCP 未配置，直接返回（不是错误）
+/// - 如果某个服务器启动失败，记录警告但继续
+/// - 如果工具发现失败，该服务器的工具不会被注册
+pub async fn register_mcp_tools(
+    registry: &mut ToolRegistry,
+    config: &crate::config::Config,
+) -> Result<()> {
+    // 如果没有配置 MCP 服务器，直接返回
+    let mcp_config = match &config.mcp {
+        Some(cfg) => cfg,
+        None => return Ok(()),
+    };
+
+    if mcp_config.is_empty() {
+        return Ok(());
+    }
+
+    crate::agent::log_info(&format!(
+        "注册 {} 个 MCP 服务器的工具...",
+        mcp_config.len()
+    ));
+
+    for (server_name, server_cfg) in mcp_config.iter() {
+        match register_single_mcp_server(registry, server_name, server_cfg).await {
+            Ok(tool_count) => {
+                crate::agent::log_info(&format!(
+                    "✓ MCP 服务器 '{}' 已启动，注册了 {} 个工具",
+                    server_name, tool_count
+                ));
+            }
+            Err(e) => {
+                crate::agent::log_info(&format!(
+                    "⚠ MCP 服务器 '{}' 启动失败: {}，跳过该服务器",
+                    server_name, e
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// 启动单个 MCP 服务器并注册其工具
+async fn register_single_mcp_server(
+    registry: &mut ToolRegistry,
+    server_name: &str,
+    server_cfg: &crate::config::McpServerConfig,
+) -> Result<usize> {
+    // 1. 启动 MCP 服务器
+    let server = McpServerManager::spawn(server_name.to_string(), server_cfg).await?;
+    let server = Arc::new(server);
+
+    // 2. 发现工具
+    let tools = server.list_tools().await?;
+    let tool_count = tools.len();
+
+    // 3. 注册每个工具
+    for mcp_tool in tools {
+        let adapter = McpToolAdapter::new(
+            mcp_tool.name.clone(),
+            mcp_tool.description.clone(),
+            mcp_tool.inputSchema.clone(),
+            Arc::clone(&server),
+        );
+        registry.register(Box::new(adapter));
+    }
+
+    Ok(tool_count)
 }

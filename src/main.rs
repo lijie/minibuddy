@@ -80,7 +80,13 @@ async fn main() -> Result<()> {
     let (agent_tx, agent_rx) = mpsc::channel::<AgentEvent>(64);
 
     // ── 4. 创建 Agent ───────────────────────────────────────
-    let tool_registry = create_default_registry();
+    let mut tool_registry = create_default_registry();
+    
+    // ── Phase 8: 注册 MCP 工具 ───────────────────────────────
+    if let Err(e) = tools::register_mcp_tools(&mut tool_registry, &cfg).await {
+        agent::log_info(&format!("⚠ MCP 工具注册失败: {}", e));
+    }
+    
     let agent = Agent::new(provider, tool_registry, agent_tx);
 
     // ── 5. 启动 Agent task ──────────────────────────────────
